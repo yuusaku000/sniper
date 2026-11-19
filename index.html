@@ -59,10 +59,47 @@ button.primary { background: var(--amber); color: #1b130b; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 #note { margin: 0; font-size: 0.82rem; color: var(--ink-dim); line-height: 1.6; }
+/* パソコンで遊ぶときのスコープ（画面いっぱいに、のぞいている見え方） */
+#scope { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
+#scope .mask {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at center, rgba(0,0,0,0) 0, rgba(0,0,0,0) 38vmin, rgba(0,0,0,0.55) 41vmin, #000 43.5vmin, #000 100%);
+}
+#scope svg { position: absolute; left: 50%; top: 50%; width: 88vmin; height: 88vmin; transform: translate(-50%, -50%); }
+#scope .hint {
+  position: absolute; left: 0; right: 0; bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  text-align: center; font-size: 0.85rem; color: var(--ink-dim); letter-spacing: 0.06em;
+}
+#scope .hint b { color: var(--amber); }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
+
+<div id="scope" aria-hidden="true">
+  <div class="mask"></div>
+  <svg viewBox="-100 -100 200 200">
+    <defs>
+      <radialGradient id="edge" cx="0" cy="0" r="100" gradientUnits="userSpaceOnUse">
+        <stop offset="0.78" stop-color="#000" stop-opacity="0"/>
+        <stop offset="0.97" stop-color="#000" stop-opacity="0.7"/>
+        <stop offset="1" stop-color="#000" stop-opacity="1"/>
+      </radialGradient>
+    </defs>
+    <circle r="100" fill="url(#edge)"/>
+    <g stroke="#0b0b0b" fill="none">
+      <path d="M-100 0 H-22 M22 0 H100 M0 100 V22 M0 -100 V-22" stroke-width="2.6"/>
+      <path d="M-22 0 H22 M0 -22 V22" stroke-width="0.5"/>
+    </g>
+    <g fill="#0b0b0b">
+      <circle cx="-8" r="0.9"/><circle cx="-14" r="0.9"/><circle cx="8" r="0.9"/><circle cx="14" r="0.9"/>
+      <circle cy="8" r="0.9"/><circle cy="14" r="0.9"/><circle cy="-8" r="0.9"/><circle cy="-14" r="0.9"/>
+    </g>
+    <circle r="1" fill="#ff3b2f"/>
+    <circle r="99.5" stroke="#1c1e22" stroke-width="1.5" fill="none"/>
+  </svg>
+  <p class="hint"><b>Shift</b> で息を止めると、ぶれが小さくなります</p>
+</div>
 
 <div id="overlay">
   <div class="card">
@@ -97,8 +134,9 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
     { x: 44,  z: 10, h: 13, color: 0x4d5a4a }
   ];
   var FIELD = { x: 0, z: -90 };
-  var SCOPE_FOV = 5;
-  var LENS_R = 0.12, LENS_D = 0.55;
+  var SCOPE_FOV = 7;          // VRのスコープの中の見える範囲（小さいほど大きく見える）
+  var LENS_R = 0.15, LENS_D = 0.34;
+  var BASE_FOV = 72, FLAT_SCOPE_FOV = 9;   // パソコンでのぞいたときは約8倍
 
   var canvas = document.getElementById("view");
   var overlay = document.getElementById("overlay");
@@ -623,7 +661,7 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
   var scopeCam = new THREE.PerspectiveCamera(SCOPE_FOV, 1, 0.5, 1500);
   var scopeGroup = new THREE.Group();
   function overlayMat(opts) { opts.depthTest = false; opts.depthWrite = false; opts.fog = false; opts.transparent = true; return new THREE.MeshBasicMaterial(opts); }
-  var dim = new THREE.Mesh(new THREE.RingGeometry(LENS_R, 1.4, 48), overlayMat({ color: 0x000000, opacity: 0.62 }));
+  var dim = new THREE.Mesh(new THREE.RingGeometry(LENS_R, 2.5, 48), overlayMat({ color: 0x000000, opacity: 1 }));
   dim.renderOrder = 900; scopeGroup.add(dim);
   var lens = new THREE.Mesh(new THREE.CircleGeometry(LENS_R, 48), overlayMat({ map: rt.texture, transparent: false }));
   lens.renderOrder = 901; scopeGroup.add(lens);
@@ -870,8 +908,10 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
   // ===== 入力：パソコン・スマホ =====
   var yaw = 0, pitch = -0.12, recoil = 0;
   var lastX = 0, lastY = 0, touchDown = false;
+  var zoomT = 0, swayT = 0, breath = 0, breathRest = 0;
+  var scopeEl = document.getElementById("scope");
   function look(dx, dy) {
-    var sens = scoping ? 0.0006 : 0.0032;
+    var sens = 0.0032 * (camera.fov / BASE_FOV);
     yaw -= dx * sens; pitch -= dy * sens;
     pitch = Math.max(-1.3, Math.min(1.0, pitch));
   }
@@ -900,6 +940,7 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
   });
   window.addEventListener("keydown", function (e) {
     if (e.code === "Space" || e.code === "KeyE") { moveNext(); e.preventDefault(); }
+    if ((e.code === "ShiftLeft" || e.code === "ShiftRight") && breath <= 0 && breathRest <= 0) { breath = 3; }
   });
 
   // ===== 1コマごとの処理 =====
@@ -914,20 +955,39 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 
     if (inXR) pollButtons(now);
 
+    // のぞき具合（0 = ふつう、1 = のぞききった）
+    var wantZoom = scoping && state === "play" && moveTarget < 0 ? 1 : 0;
+    zoomT += (wantZoom - zoomT) * Math.min(1, dt * 16);
+    if (Math.abs(wantZoom - zoomT) < 0.003) zoomT = wantZoom;
+    var ez = zoomT * zoomT * (3 - 2 * zoomT);
+
+    // 息を止める（3秒）→ そのあと2秒は止められない
+    if (breath > 0) { breath -= dt; if (breath <= 0) breathRest = 2; }
+    else if (breathRest > 0) breathRest -= dt;
+
     // 視点（画面で遊ぶとき）
     if (!inXR) {
       recoil *= Math.pow(0.001, dt);
-      camera.rotation.set(pitch + recoil, yaw, 0);
-      if (gun.parent !== camera) { camera.add(gun); gun.position.set(0.2, -0.22, -0.4); gun.rotation.set(0.02, 0.05, 0); gun.scale.setScalar(0.8); }
-      gun.visible = !scoping && state !== "menu";
+      // のぞいている間は、呼吸で少しだけゆれる
+      swayT += dt;
+      var amp = (breath > 0 ? 0.12 : 1) * ez;
+      var sx = (Math.sin(swayT * 0.8) + 0.5 * Math.sin(swayT * 2.1)) * 0.0026 * amp;
+      var sy = Math.cos(swayT * 0.6) * 0.002 * amp;
+      camera.rotation.set(pitch + recoil + sy, yaw + sx, 0);
+      var fov = BASE_FOV + (FLAT_SCOPE_FOV - BASE_FOV) * ez;
+      if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = fov; camera.updateProjectionMatrix(); }
+      scopeEl.style.opacity = String(Math.min(1, ez * 1.3));
+      if (gun.parent !== camera) camera.add(gun);
+      gun.visible = false;          // パソコンでは銃を出さない
       laser.visible = false;
-      centerDot.visible = !scoping && state === "play";
+      centerDot.visible = state === "play" && ez < 0.05;
     } else {
       if (gun.parent === camera && activeCtrl) { activeCtrl.add(gun); }
       if (gun.parent !== camera) { gun.position.set(0, 0, 0); gun.rotation.set(0, 0, 0); gun.scale.setScalar(1); }
-      gun.visible = true;
-      laser.visible = !scoping && state === "play";
+      gun.visible = ez < 0.05;      // のぞいている間は手元の銃を消す
+      laser.visible = ez < 0.05 && state === "play";
       centerDot.visible = false;
+      scopeEl.style.opacity = "0";
     }
 
     // 移動の暗転
@@ -968,14 +1028,16 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
       clearT += dt;
       drawHud("ミッション完了！", clearT > 2.5 ? "引き金でもう一度" : clearInfo, "#8fe39a");
     }
-    hud.visible = state !== "menu";
+    hud.visible = state !== "menu" && ez < 0.4;
 
-    // スコープ
+    // スコープ（VR）：目の前に大きなレンズ、まわりは真っ暗
     computeAim();
-    scopeGroup.visible = scoping && state === "play";
+    scopeGroup.visible = inXR && ez > 0.01 && state === "play";
     if (scopeGroup.visible) {
       scopeGroup.position.copy(headPos).addScaledVector(aimDir, LENS_D);
       scopeGroup.lookAt(headPos);
+      scopeGroup.scale.setScalar(0.65 + 0.35 * ez);
+      dim.material.opacity = ez;
       scopeCam.position.copy(headPos);
       scopeCam.lookAt(headPos.x + aimDir.x, headPos.y + aimDir.y, headPos.z + aimDir.z);
       scopeCam.updateMatrixWorld(true);
@@ -997,6 +1059,7 @@ button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
   function onResize() {
     if (renderer.xr.isPresenting) return;
     camera.aspect = window.innerWidth / window.innerHeight;
+    camera.fov = BASE_FOV;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   }
